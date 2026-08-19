@@ -1,0 +1,63 @@
+# FMCG Sales Data Pipeline — Databricks Medallion Architecture
+
+An end-to-end data engineering pipeline built on **Databricks** that ingests sales data from two source systems (a parent company and an acquired child company), cleans and models it through a **Bronze -> Silver -> Gold (medallion) architecture**, merges the child company's data into the parent's unified analytics layer, and serves it to a BI dashboard.
+
+## Architecture
+
+S3 (raw CSVs, RAW + Archive) -> Lakeflow Jobs -> Bronze Layer -> Silver Layer -> Gold Layer (Child) -> merge into Gold Analytics Table (Parent org) -> Serving Layer (Dashboards / Genie).
+
+Governed end-to-end through Databricks **Unity Catalog** (`fmcg` catalog, `bronze` / `silver` / `gold` schemas), with ingestion orchestrated through **Lakeflow Jobs**.
+
+## What this project does
+
+Two companies, two sets of raw sales data, one warehouse:
+
+- **Parent company** -- a full historical dump of customers, products, gross pricing, and orders, loaded once and then updated incrementally.
+- **Child company** (recently acquired) -- its own customers, products, and pricing files, plus daily order CSVs landing in S3 that need to be picked up and merged into the parent's gold layer over time.
+
+The pipeline standardizes both sources into a shared schema, resolves data quality issues (duplicate keys, inconsistent casing, mixed date formats, malformed IDs), and produces a single **enriched, denormalized `fact_orders` view** that a dashboard queries directly.
+
+**Bronze layer** -- raw CSVs are read from S3 exactly as they arrive (`inferSchema`, file metadata captured for lineage) and written as Delta tables with Change Data Feed enabled.
+
+**Silver layer** -- per-entity cleaning:
+- `dim_customers` -- drop duplicate customer IDs, fix city typos, title-case names
+- `dim_products` -- drop duplicates, normalize inconsistent title casing (`energy bars` -> `Energy Bars`)
+- `dim_gross_price` -- parse `month` from multiple inconsistent date formats into one standard format
+- `fact_orders` -- drop rows with missing order quantity, sanitize non-numeric customer IDs
+
+**Gold layer** -- the child company's cleaned fact table is merged with the parent's gold analytics table (`fmcg.gold.fact_orders`). New arrivals land via `COPY INTO` for incremental loads; a `dim_date` table is generated programmatically (one row per month) to support time-based rollups.
+
+**Serving layer** -- a denormalized SQL view (`vw_fact_orders_enriched`) joins `fact_orders` against the date, customer, product, and pricing dimensions and computes `total_amount_inr`, feeding a BI dashboard directly.
+
+## Tech stack
+
+| Layer | Tools |
+|---|---|
+| Compute / platform | Databricks (Lakeflow Jobs, Unity Catalog) |
+| Processing | PySpark, Spark SQL |
+| Storage format | Delta Lake (with Change Data Feed) |
+| Source storage | AWS S3 |
+| Ingestion pattern | Full load + incremental load (`COPY INTO`) |
+| Dashboarding | SQL view + BI dashboard |
+
+## Repository structure
+
+`1_codes/1_setup/` -- catalog & schema setup, date dimension, shared utilities.
+`1_codes/2_dimension_data_processing/` -- Bronze -> Silver -> Gold for customers, products, pricing.
+`1_codes/3_fact_data_processing/` -- full load and incremental load for orders (fact table).
+`2_dashboarding/` -- the gold-layer denormalized SQL view powering the dashboard.
+`sample_data/` -- a couple of representative sample CSVs (not the full historical dump) so the code is runnable and the schema is inspectable.
+
+Code is provided as plain `.py` scripts (converted from the original Databricks notebooks, comments mark the original markdown cells) so it's easy to read directly on GitHub.
+
+## Key data engineering problems solved
+
+- **Merging two independently-evolving source systems** (parent + child company) into one gold analytics table without breaking either pipeline
+- **Idempotent full loads vs. incremental loads** -- `COPY INTO` staging pattern so re-running incremental jobs doesn't double-count orders
+- **Schema drift / inconsistent formatting** across source files (mixed date formats, inconsistent text casing, non-numeric IDs)
+- **File lifecycle management** -- moving processed landing files to an archive path so the next run only picks up new arrivals
+- **Denormalization for BI** -- a single wide view instead of forcing the dashboard tool to join five tables
+
+---
+
+*Built as a hands-on data engineering project to practice medallion-architecture pipeline design on Databricks.*
